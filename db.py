@@ -12,6 +12,7 @@ entries.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 from pathlib import Path
@@ -49,6 +50,11 @@ CREATE TABLE IF NOT EXISTS schema_version (
 # Append-only list of (version, ddl) pairs. Each entry runs at most once per
 # database. The first migration (v1) dedupes any (snapshot_id, path) collisions
 # from pre-UNIQUE databases, then enforces uniqueness going forward.
+#
+# Migrations MUST be idempotent: `executescript` autocommits internally, so
+# the DDL and the `INSERT INTO schema_version` row are not atomic. If the
+# process dies between the two, the migration will run again on next boot.
+# Use `IF NOT EXISTS` / `DELETE ... WHERE` style statements only.
 _MIGRATIONS: list[tuple[int, str]] = [
     (
         1,
@@ -87,6 +93,20 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
+@contextlib.contextmanager
+def session(db_path: Optional[Path] = None):
+    """Open a connection, yield it, and close on exit.
+
+    Sugar for the open/try/finally/close pattern repeated across the tool
+    handlers and the pre-LLM hook.
+    """
+    conn = connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _apply_migrations(conn)
@@ -123,21 +143,21 @@ def insert_snapshot(
 def insert_modules(
     conn: sqlite3.Connection, snapshot_id: int, rows: Iterable[dict]
 ) -> int:
-    payload = [
+    module_rows = [
         (
             snapshot_id,
-            r["path"],
-            r.get("package"),
-            int(r["lines_total"]),
-            int(r["lines_covered"]),
-            float(r["pct"]),
+            row["path"],
+            row.get("package"),
+            int(row["lines_total"]),
+            int(row["lines_covered"]),
+            float(row["pct"]),
         )
-        for r in rows
+        for row in rows
     ]
     conn.executemany(
         "INSERT INTO modules "
         "(snapshot_id, path, package, lines_total, lines_covered, pct) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        payload,
+        module_rows,
     )
-    return len(payload)
+    return len(module_rows)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,40 @@ def _normalize_path(filename: str) -> str:
     while p.startswith("/"):
         p = p[1:]
     return p
+
+
+def _count_covered_lines(lines_el) -> tuple[int, int]:
+    """Return (total, covered) line counts for a Cobertura `<lines>` element."""
+    if lines_el is None:
+        return 0, 0
+    lines = lines_el.findall("line")
+    covered = 0
+    for line in lines:
+        try:
+            if int(line.get("hits", "0")) > 0:
+                covered += 1
+        except (TypeError, ValueError):
+            # Unparseable `hits` is treated as 0 — Cobertura producers should
+            # always emit integers, but be defensive.
+            continue
+    return len(lines), covered
+
+
+def _module_from_class(class_el, package_name: str) -> Optional[ModuleCoverage]:
+    """Convert a Cobertura `<class>` element to a `ModuleCoverage`, or None
+    if the element lacks a `filename` attribute."""
+    filename = class_el.get("filename")
+    if not filename:
+        return None
+    total, covered = _count_covered_lines(class_el.find("lines"))
+    pct = (100.0 * covered / total) if total > 0 else 0.0
+    return ModuleCoverage(
+        path=_normalize_path(filename),
+        package=package_name,
+        lines_total=total,
+        lines_covered=covered,
+        pct=pct,
+    )
 
 
 def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
@@ -73,33 +107,9 @@ def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
         if classes_el is None:
             continue
         for class_el in classes_el.findall("class"):
-            filename = class_el.get("filename")
-            if not filename:
-                continue
-            filename = _normalize_path(filename)
-            lines_el = class_el.find("lines")
-            lines = list(lines_el.findall("line")) if lines_el is not None else []
-            total = len(lines)
-            covered = 0
-            for line in lines:
-                hits_attr = line.get("hits", "0")
-                try:
-                    if int(hits_attr) > 0:
-                        covered += 1
-                except (TypeError, ValueError):
-                    # Treat unparseable `hits` as 0 — Cobertura producers should
-                    # always emit integers, but be defensive.
-                    continue
-            pct = (100.0 * covered / total) if total > 0 else 0.0
-            rows.append(
-                ModuleCoverage(
-                    path=filename,
-                    package=package_name,
-                    lines_total=total,
-                    lines_covered=covered,
-                    pct=pct,
-                )
-            )
+            module = _module_from_class(class_el, package_name)
+            if module is not None:
+                rows.append(module)
 
     if not rows:
         raise ValueError(f"no <class> entries found in {p}")

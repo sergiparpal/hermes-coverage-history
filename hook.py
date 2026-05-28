@@ -21,6 +21,7 @@ import re
 from typing import Optional
 
 import db
+import defaults
 import trends
 
 
@@ -43,25 +44,27 @@ def inject_coverage_summary(
         if not _COVERAGE_RE.search(user_message):
             return None
 
-        conn = db.connect()
-        try:
+        threshold = defaults.env_threshold()
+        window_days = defaults.env_window_days()
+
+        with db.session() as conn:
             known = trends.list_known_modules(conn)
             module = _match_known_module(user_message, known)
             if not module:
                 return None
-            since = trends.parse_since("30d")
+            since = trends.parse_since(defaults.DEFAULT_SINCE)
             series = trends.module_series(conn, module, since=since)
-        finally:
-            conn.close()
 
         if not series:
             return None
 
-        info = trends.detect_regression(series, threshold=2.0, window_days=30)
-        if info["current_pct"] is None:
+        verdict = trends.detect_regression(
+            series, threshold=threshold, window_days=window_days,
+        )
+        if verdict["current_pct"] is None:
             return None
 
-        summary = _format_summary(module, series, info)
+        summary = _format_summary(module, series, verdict)
         if not summary:
             return None
         return {"context": summary}
@@ -85,15 +88,15 @@ def _match_known_module(message: str, known: dict) -> Optional[str]:
     """
     tokens = set(_TOKEN_RE.findall(message))
     candidates: list[str] = []
-    for p in known.get("paths", []):
-        if not p:
+    for path in known.get("paths", []):
+        if not path:
             continue
-        if p in message:
-            candidates.append(p)
+        if path in message:
+            candidates.append(path)
             continue
-        tail = p.rsplit("/", 1)[-1]
+        tail = path.rsplit("/", 1)[-1]
         if tail and tail in tokens:
-            candidates.append(p)
+            candidates.append(path)
     for pkg in known.get("packages", []):
         if not pkg:
             continue
@@ -111,18 +114,18 @@ def _match_known_module(message: str, known: dict) -> Optional[str]:
     return unique[0]
 
 
-def _format_summary(module: str, series, info) -> str:
-    current = info["current_pct"]
-    window_max = info["window_max_pct"]
-    delta = info["delta_vs_window_max"]
-    parts = [
+def _format_summary(module: str, series, verdict) -> str:
+    current = verdict["current_pct"]
+    window_max = verdict["window_max_pct"]
+    delta = verdict["delta_vs_window_max"]
+    summary_fields = [
         f"current={current:.2f}%",
         f"samples={len(series)}",
     ]
     if window_max is not None:
-        parts.append(f"window_max={window_max:.2f}%")
+        summary_fields.append(f"window_max={window_max:.2f}%")
     if delta is not None:
-        parts.append(f"delta_vs_window_max={delta:+.2f}pp")
-    if info.get("regression"):
-        parts.append("regression=YES")
-    return f"Coverage summary for {module}: " + ", ".join(parts)
+        summary_fields.append(f"delta_vs_window_max={delta:+.2f}pp")
+    if verdict.get("regression"):
+        summary_fields.append("regression=YES")
+    return f"Coverage summary for {module}: " + ", ".join(summary_fields)
