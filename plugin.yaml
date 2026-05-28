@@ -1,0 +1,8 @@
+name: hermes-coverage-history
+version: 0.1.0
+description: Tracks per-module test coverage over time and detects silent coverage regression.
+provides_tools:
+  - coverage_trend
+  - coverage_regressions
+provides_hooks:
+  - pre_llm_call
