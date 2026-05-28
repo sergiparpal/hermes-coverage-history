@@ -22,6 +22,7 @@ from typing import Optional
 
 import db
 import defaults
+import sanitize
 import trends
 
 
@@ -47,7 +48,7 @@ def inject_coverage_summary(
         threshold = defaults.env_threshold()
         window_days = defaults.env_window_days()
 
-        with db.session() as conn:
+        with db.session(create=False) as conn:
             known = trends.list_known_modules(conn)
             module = _match_known_module(user_message, known)
             if not module:
@@ -118,7 +119,7 @@ def _format_summary(module: str, series, verdict) -> str:
     current = verdict["current_pct"]
     window_max = verdict["window_max_pct"]
     delta = verdict["delta_vs_window_max"]
-    safe_module = _sanitize_for_prompt(module)
+    safe_module = sanitize.sanitize_text(module, max_len=256)
     summary_fields = [
         f"current={current:.2f}%",
         f"samples={len(series)}",
@@ -130,15 +131,3 @@ def _format_summary(module: str, series, verdict) -> str:
     if verdict.get("regression"):
         summary_fields.append("regression=YES")
     return f"Coverage summary for {safe_module}: " + ", ".join(summary_fields)
-
-
-def _sanitize_for_prompt(value: str, *, max_len: int = 256) -> str:
-    """Strip control characters and cap length before embedding a stored
-    value into the LLM-visible prompt context.
-
-    Defence in depth against indirect prompt injection: even if a poisoned
-    Cobertura row slipped past the parser-side validation, it cannot
-    shape the prompt across newlines or carry a long instruction payload.
-    """
-    cleaned = "".join(c for c in value if ord(c) >= 0x20 and ord(c) != 0x7f)
-    return cleaned[:max_len]

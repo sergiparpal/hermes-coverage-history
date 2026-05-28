@@ -122,3 +122,47 @@ def test_busy_timeout_is_set(tmp_db):
     from immediately erroring with 'database is locked'."""
     timeout_ms = tmp_db.execute("PRAGMA busy_timeout").fetchone()[0]
     assert timeout_ms >= 5000
+
+
+def _spy_on_init_schema(db_module, monkeypatch):
+    """Record each init_schema call while still running the real DDL."""
+    calls = []
+    real_init = db_module.init_schema
+
+    def spy(conn):
+        calls.append(1)
+        return real_init(conn)
+
+    monkeypatch.setattr(db_module, "init_schema", spy)
+    return calls
+
+
+def test_connect_create_false_skips_init_when_schema_present(
+    hermes_home, monkeypatch
+):
+    """#3: once the schema exists, a reader open (create=False) must NOT
+    re-run init_schema — reads don't take write intent on the hot path."""
+    db.connect().close()  # writer materializes the schema first
+
+    calls = _spy_on_init_schema(db, monkeypatch)
+    conn = db.connect(create=False)
+    try:
+        assert calls == []  # schema present → no DDL on the read path
+        # ...and the connection is still usable for reads.
+        assert conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_connect_create_false_lazily_materializes_virgin_db(
+    hermes_home, monkeypatch
+):
+    """#3: a reader opening a never-written DB still gets the schema created
+    once, so queries return empty instead of raising 'no such table'."""
+    calls = _spy_on_init_schema(db, monkeypatch)
+    conn = db.connect(create=False)
+    try:
+        assert calls == [1]  # materialized exactly once on the virgin DB
+        assert conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0] == 0
+    finally:
+        conn.close()

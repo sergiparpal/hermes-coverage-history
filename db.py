@@ -81,7 +81,22 @@ def get_db_path() -> Path:
     return hermes_home() / "coverage-history" / "coverage_history.db"
 
 
-def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
+def connect(
+    db_path: Optional[Path] = None, *, create: bool = True
+) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and concurrency-friendly pragmas.
+
+    `create=True` (the ingestion / CLI write path): ensure the schema exists,
+    run any pending migrations, and lock down file permissions.
+
+    `create=False` (the read path — LLM tools and the `pre_llm_call` hook):
+    skip the DDL + migration work when the schema is already present, so a
+    read-only tool call does not take write intent (an `executescript` of the
+    DDL plus the migration commit) on every invocation. The schema is still
+    materialized lazily the first time a reader opens a virgin DB, so the
+    "no coverage recorded yet" case returns empty results rather than raising
+    `no such table`.
+    """
     path = Path(db_path) if db_path is not None else get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30.0)
@@ -89,12 +104,13 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    # Restrict perms so other users on a multi-user host can't read the
-    # local coverage history (default umask 0o022 leaves the DB world-
-    # readable). The parent dir at 0o700 also gates the WAL / SHM files,
-    # which SQLite creates with default perms.
-    _restrict_perms(path)
+    if create or not _schema_present(conn):
+        init_schema(conn)
+        # Restrict perms so other users on a multi-user host can't read the
+        # local coverage history (default umask 0o022 leaves the DB world-
+        # readable). The parent dir at 0o700 also gates the WAL / SHM files,
+        # which SQLite creates with default perms.
+        _restrict_perms(path)
     return conn
 
 
@@ -109,14 +125,28 @@ def _restrict_perms(path: Path) -> None:
         pass
 
 
+def _schema_present(conn: sqlite3.Connection) -> bool:
+    """True if the core schema is already initialized in this database.
+
+    A single cheap read against `sqlite_master` lets the read path
+    (`connect(create=False)`) skip the DDL + migration work that the write
+    path runs for every connection.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='modules'"
+    ).fetchone()
+    return row is not None
+
+
 @contextlib.contextmanager
-def session(db_path: Optional[Path] = None):
+def session(db_path: Optional[Path] = None, *, create: bool = True):
     """Open a connection, yield it, and close on exit.
 
     Sugar for the open/try/finally/close pattern repeated across the tool
-    handlers and the pre-LLM hook.
+    handlers and the pre-LLM hook. Pass `create=False` on read-only paths
+    (LLM tools, the pre-LLM hook) to skip schema DDL when it already exists.
     """
-    conn = connect(db_path)
+    conn = connect(db_path, create=create)
     try:
         yield conn
     finally:

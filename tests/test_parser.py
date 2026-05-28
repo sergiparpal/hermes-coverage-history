@@ -98,3 +98,30 @@ def test_parse_handles_zero_line_class(tmp_path):
     assert rows[0].lines_total == 0
     assert rows[0].lines_covered == 0
     assert rows[0].pct == 0.0
+
+
+# ---------- #4: format dispatch seam ---------------------------------------
+
+
+def test_parse_report_explicit_cobertura(sample_cobertura_xml):
+    """An explicit fmt='cobertura' is equivalent to the auto default."""
+    rows = cov_parser.parse_report(sample_cobertura_xml, fmt="cobertura")
+    assert len(rows) == 3
+
+
+def test_parse_report_auto_resolves_to_cobertura(sample_cobertura_xml):
+    auto = cov_parser.parse_report(sample_cobertura_xml)
+    explicit = cov_parser.parse_report(sample_cobertura_xml, fmt="cobertura")
+    assert [r.path for r in auto] == [r.path for r in explicit]
+
+
+def test_parse_report_format_is_case_insensitive(sample_cobertura_xml):
+    rows = cov_parser.parse_report(sample_cobertura_xml, fmt="Cobertura")
+    assert len(rows) == 3
+
+
+def test_parse_report_unknown_format_raises(sample_cobertura_xml):
+    """An unsupported format is a clear ValueError, not a silent fallback."""
+    with pytest.raises(ValueError) as exc:
+        cov_parser.parse_report(sample_cobertura_xml, fmt="json")
+    assert "format" in str(exc.value).lower()

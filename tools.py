@@ -13,6 +13,7 @@ from typing import Callable
 
 import db
 import defaults
+import sanitize
 import trends
 
 logger = logging.getLogger(__name__)
@@ -24,19 +25,6 @@ _MAX_LIMIT = 1000
 
 
 # ---------- shared scaffolding ---------------------------------------------
-
-
-def _sanitize_for_response(value: str, *, max_len: int = 512) -> str:
-    """Scrub control characters from a DB-sourced string before it enters
-    the LLM-visible response. Defence in depth against indirect prompt
-    injection — even if a row poisoned with newlines / instruction-shaped
-    prose predated the parser-side validation, it cannot reshape the
-    prompt by the time it leaves a tool handler.
-    """
-    if not isinstance(value, str):
-        return value
-    cleaned = "".join(c for c in value if ord(c) >= 0x20 and ord(c) != 0x7f)
-    return cleaned[:max_len]
 
 
 def _resolve_threshold(args: dict) -> float:
@@ -113,7 +101,7 @@ def coverage_trend(args: dict, **kwargs) -> dict:
     window_days = _resolve_window_days(args)
     since = trends.parse_since(since_str)
 
-    with db.session() as conn:
+    with db.session(create=False) as conn:
         series = trends.module_series(conn, module, since)
 
     verdict = trends.detect_regression(
@@ -136,7 +124,7 @@ def coverage_regressions(args: dict, **kwargs) -> dict:
     limit = _resolve_limit(args)
     since = trends.parse_since(since_str)
 
-    with db.session() as conn:
+    with db.session(create=False) as conn:
         regressions = trends.worst_regressions(
             conn,
             since=since,
@@ -150,7 +138,7 @@ def coverage_regressions(args: dict, **kwargs) -> dict:
     # this guards rows from any pre-hardening DB.
     for r in regressions:
         if "module" in r:
-            r["module"] = _sanitize_for_response(r["module"])
+            r["module"] = sanitize.sanitize_text(r["module"])
 
     return {
         "since": since_str,

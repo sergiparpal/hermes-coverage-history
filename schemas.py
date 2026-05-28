@@ -2,7 +2,13 @@
 
 Per §2.5: the `description` field belongs *inside* the schema; do not pass
 `description=` to `register_tool`.
+
+Default values and env-var names are interpolated from `defaults` so the
+schema the LLM reads can never drift from the values the handlers actually
+apply — `defaults.py` is the single source of truth.
 """
+
+import defaults
 
 COVERAGE_TREND = {
     "name": "coverage_trend",
@@ -29,24 +35,24 @@ COVERAGE_TREND = {
                 "description": (
                     "Lower bound for the series. Accepts 'Nd' (days), "
                     "'Nw' (weeks), an ISO date 'YYYY-MM-DD', or omit "
-                    "for all history. Defaults to '30d'."
+                    f"for all history. Defaults to '{defaults.DEFAULT_SINCE}'."
                 ),
-                "default": "30d",
+                "default": defaults.DEFAULT_SINCE,
             },
             "threshold": {
                 "type": "number",
                 "description": (
                     "Percentage-point drop vs. the trailing window's max "
                     "that constitutes a regression. Defaults to "
-                    "HERMES_COVERAGE_REGRESSION_THRESHOLD or 2.0."
+                    f"{defaults.ENV_THRESHOLD} or {defaults.REGRESSION_THRESHOLD}."
                 ),
             },
             "window_days": {
                 "type": "integer",
                 "description": (
                     "Trailing window in days for the regression "
-                    "comparison. Defaults to HERMES_COVERAGE_WINDOW_DAYS "
-                    "or 30."
+                    f"comparison. Defaults to {defaults.ENV_WINDOW_DAYS} "
+                    f"or {defaults.WINDOW_DAYS}."
                 ),
             },
         },
@@ -72,29 +78,29 @@ COVERAGE_REGRESSIONS = {
                 "description": (
                     "Lower bound for the scan. Accepts 'Nd', 'Nw', an "
                     "ISO date 'YYYY-MM-DD', or omit for all history. "
-                    "Defaults to '30d'."
+                    f"Defaults to '{defaults.DEFAULT_SINCE}'."
                 ),
-                "default": "30d",
+                "default": defaults.DEFAULT_SINCE,
             },
             "threshold": {
                 "type": "number",
                 "description": (
                     "Percentage-point drop vs. window max that flags a "
-                    "regression. Default 2.0 or env "
-                    "HERMES_COVERAGE_REGRESSION_THRESHOLD."
+                    f"regression. Default {defaults.REGRESSION_THRESHOLD} or env "
+                    f"{defaults.ENV_THRESHOLD}."
                 ),
             },
             "window_days": {
                 "type": "integer",
                 "description": (
-                    "Trailing window in days. Default 30 or env "
-                    "HERMES_COVERAGE_WINDOW_DAYS."
+                    f"Trailing window in days. Default {defaults.WINDOW_DAYS} or env "
+                    f"{defaults.ENV_WINDOW_DAYS}."
                 ),
             },
             "limit": {
                 "type": "integer",
-                "description": "Cap the number of regressions returned. Default 10.",
-                "default": 10,
+                "description": f"Cap the number of regressions returned. Default {defaults.LIMIT}.",
+                "default": defaults.LIMIT,
             },
         },
         "required": [],

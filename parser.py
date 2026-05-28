@@ -1,9 +1,11 @@
-"""Cobertura XML parser.
+"""Coverage report parser.
 
 Standalone module: no Hermes imports here. Only the standard library.
 
-A future `coverage json` parser would be an additive function in this module,
-not a refactor.
+`parse_report(path, fmt="auto")` is the single public entry point and
+dispatches by format (see `_PARSERS`). Cobertura XML is the only format
+implemented today; a future `coverage json` parser slots in as an additive
+sibling (`_parse_json` plus one `_PARSERS` entry), not a refactor of callers.
 """
 
 from __future__ import annotations
@@ -124,7 +126,7 @@ def _module_from_class(class_el, package_name: str) -> Optional[ModuleCoverage]:
     )
 
 
-def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
+def _parse_cobertura(path: Union[str, Path]) -> List[ModuleCoverage]:
     """Parse a Cobertura XML report into a list of `ModuleCoverage` rows.
 
     Raises `ValueError` on a missing, malformed, oversized, structurally
@@ -172,3 +174,46 @@ def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
     if not rows:
         raise ValueError(f"no <class> entries found in {p}")
     return rows
+
+
+# Report format -> parser function. This dispatch is the seam for a future
+# `coverage json` parser: write `_parse_<fmt>` as an additive sibling and add
+# one entry here — existing callers (the `record` CLI) keep calling
+# `parse_report(path)` unchanged.
+_PARSERS = {
+    "cobertura": _parse_cobertura,
+}
+
+
+def _detect_format(path: Path) -> str:
+    """Resolve the report format for `fmt="auto"`.
+
+    Only Cobertura XML is implemented today, so detection currently always
+    resolves to "cobertura". This is the single place a future format hooks
+    in (e.g. a `.json` suffix -> "json").
+    """
+    return "cobertura"
+
+
+def parse_report(
+    path: Union[str, Path], fmt: str = "auto"
+) -> List[ModuleCoverage]:
+    """Parse a coverage report into a list of `ModuleCoverage` rows.
+
+    `fmt` selects the report format; "auto" (the default) detects it from the
+    report. Only Cobertura XML is supported today — `coverage json` would be
+    added as an additive sibling parser behind this same entry point (see
+    `_PARSERS`), not as a refactor of callers.
+
+    Raises `ValueError` on an unknown `fmt`, or on a missing, malformed,
+    oversized, structurally empty, or DTD-carrying report.
+    """
+    requested = (fmt or "auto").lower()
+    resolved = _detect_format(Path(path)) if requested == "auto" else requested
+    parser_fn = _PARSERS.get(resolved)
+    if parser_fn is None:
+        raise ValueError(
+            f"unsupported coverage report format: {resolved!r} "
+            f"(known: {', '.join(sorted(_PARSERS))})"
+        )
+    return parser_fn(path)
