@@ -11,6 +11,8 @@ def _seed_module(conn, path="pkg_a/foo.py", package="pkg_a", lt=10, lc=9):
         "lines_total": lt, "lines_covered": lc,
         "pct": 100.0 * lc / lt,
     }])
+    # The hook opens its own connection; commit so it can see the seed.
+    conn.commit()
 
 
 def test_returns_none_for_empty_or_none_message(hermes_home):
@@ -101,6 +103,28 @@ def test_hook_accepts_forward_compat_kwargs(tmp_db, hermes_home):
         future_unknown_kwarg="zzz",
     )
     assert out is not None
+
+
+def test_short_package_does_not_match_substring(tmp_db, hermes_home):
+    """H2: a single-letter package like 'x' must not match 'expat' in the
+    message. Substring matching on short package names was producing false
+    positives."""
+    _seed_module(tmp_db, path="x/foo.py", package="x")
+    out = hook.inject_coverage_summary(
+        user_message="Got a coverage failure in the expat parser today."
+    )
+    assert out is None
+
+
+def test_ambiguous_tail_match_skips(tmp_db, hermes_home):
+    """M5: two stored paths with the same basename should not silently pick
+    one when the user only mentions the basename."""
+    _seed_module(tmp_db, path="pkg_a/util.py", package="pkg_a")
+    _seed_module(tmp_db, path="pkg_b/util.py", package="pkg_b")
+    out = hook.inject_coverage_summary(
+        user_message="coverage of util.py please"
+    )
+    assert out is None
 
 
 def test_hook_swallows_exceptions(monkeypatch, hermes_home):

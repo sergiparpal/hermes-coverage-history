@@ -2,7 +2,8 @@
 
 The hook injects context **only** when:
   1. The user's message mentions "coverage" or "cobertura", AND
-  2. A known module path or package name is referenced in the message.
+  2. A known module path or package name is referenced in the message
+     (full-path substring, OR token match for the basename / package).
 
 This keeps injection rare and prompt-cache-friendly — coverage context only
 shows up when the user is actually talking about coverage of something we
@@ -69,13 +70,24 @@ def inject_coverage_summary(
 
 
 def _match_known_module(message: str, known: dict) -> Optional[str]:
-    """Return the most specific known module the message references, or None."""
+    """Return the most specific known module the message references, or None.
+
+    Matching rules:
+      - A stored *path* matches if it appears as a substring anywhere in the
+        message, OR its basename appears as a standalone token. Path strings
+        are distinctive (they contain `/` or `.`), so substring matches are
+        safe.
+      - A stored *package* matches only as a standalone token — substring
+        matching short package names (e.g. `"x"`) would fire on any word
+        that contains those letters (`"expat"` etc.).
+      - If two candidates tie at the longest length, the reference is
+        ambiguous and we skip injection rather than guess.
+    """
     tokens = set(_TOKEN_RE.findall(message))
-    candidates = []
+    candidates: list[str] = []
     for p in known.get("paths", []):
         if not p:
             continue
-        # Full path mention, or the tail (e.g. "foo.py") as a standalone token.
         if p in message:
             candidates.append(p)
             continue
@@ -85,13 +97,18 @@ def _match_known_module(message: str, known: dict) -> Optional[str]:
     for pkg in known.get("packages", []):
         if not pkg:
             continue
-        if pkg in message or pkg in tokens:
+        if pkg in tokens:
             candidates.append(pkg)
+
     if not candidates:
         return None
-    # Prefer the longest (most specific) match — full paths win over packages.
-    candidates.sort(key=len, reverse=True)
-    return candidates[0]
+    # Deduplicate while preserving first-seen order, then prefer the longest
+    # (most specific) match. Two-way ties at the top → ambiguous → skip.
+    unique = list(dict.fromkeys(candidates))
+    unique.sort(key=len, reverse=True)
+    if len(unique) >= 2 and len(unique[0]) == len(unique[1]):
+        return None
+    return unique[0]
 
 
 def _format_summary(module: str, series, info) -> str:

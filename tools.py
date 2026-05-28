@@ -109,6 +109,11 @@ def coverage_regressions(args, **kwargs) -> str:
             limit = int(limit_in) if limit_in is not None else _DEFAULT_LIMIT
         except (TypeError, ValueError):
             limit = _DEFAULT_LIMIT
+        # `limit=0` means "return zero rows" (the natural interpretation),
+        # and negatives clamp to zero. Without this, the worst_regressions
+        # slice falls through and silently returns everything.
+        if limit < 0:
+            limit = 0
 
         try:
             since = trends.parse_since(since_str)

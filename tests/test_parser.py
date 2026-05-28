@@ -60,6 +60,28 @@ def test_parse_no_classes_raises(tmp_path):
         cov_parser.parse_report(p)
 
 
+def test_parse_normalizes_paths(tmp_path):
+    """L4: leading './', leading '/', and Windows backslashes must collapse
+    so the same file lands under one `path` across snapshots."""
+    p = tmp_path / "norm.xml"
+    p.write_text(
+        '<?xml version="1.0"?>'
+        '<coverage><packages>'
+        '<package name="pkg"><classes>'
+        '<class name="a" filename="./pkg/a.py"><lines>'
+        '<line number="1" hits="1"/></lines></class>'
+        '<class name="b" filename="/abs/pkg/b.py"><lines>'
+        '<line number="1" hits="1"/></lines></class>'
+        '<class name="c" filename="pkg\\\\c.py"><lines>'
+        '<line number="1" hits="1"/></lines></class>'
+        '</classes></package>'
+        '</packages></coverage>',
+        encoding="utf-8",
+    )
+    paths = {r.path for r in cov_parser.parse_report(p)}
+    assert paths == {"pkg/a.py", "abs/pkg/b.py", "pkg/c.py"}
+
+
 def test_parse_handles_zero_line_class(tmp_path):
     """A `<class>` with no `<line>` children has pct 0.0 (guard against div0)."""
     p = tmp_path / "noline.xml"

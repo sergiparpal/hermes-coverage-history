@@ -3,6 +3,11 @@
 Standalone module: no Hermes imports here, so this is unit-testable in
 isolation. The DB path is resolved at call time from `HERMES_HOME` (so tests
 can monkeypatch the env var without restarting the process).
+
+Schema evolves via the `_MIGRATIONS` list — every migration runs at most
+once per database, tracked in `schema_version`. To extend the schema,
+append a new (version, ddl) tuple. Never reorder or rewrite existing
+entries.
 """
 
 from __future__ import annotations
@@ -34,7 +39,29 @@ CREATE TABLE IF NOT EXISTS modules (
 CREATE INDEX IF NOT EXISTS idx_modules_path   ON modules(path);
 CREATE INDEX IF NOT EXISTS idx_modules_snap   ON modules(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON snapshots(recorded_at);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY
+);
 """
+
+
+# Append-only list of (version, ddl) pairs. Each entry runs at most once per
+# database. The first migration (v1) dedupes any (snapshot_id, path) collisions
+# from pre-UNIQUE databases, then enforces uniqueness going forward.
+_MIGRATIONS: list[tuple[int, str]] = [
+    (
+        1,
+        """
+        DELETE FROM modules
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid) FROM modules GROUP BY snapshot_id, path
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_modules_snap_path
+            ON modules(snapshot_id, path);
+        """,
+    ),
+]
 
 
 def hermes_home() -> Path:
@@ -51,9 +78,10 @@ def get_db_path() -> Path:
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
@@ -61,7 +89,20 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _apply_migrations(conn)
     conn.commit()
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    current = cur[0] if cur and cur[0] is not None else 0
+    for version, ddl in _MIGRATIONS:
+        if version <= current:
+            continue
+        conn.executescript(ddl)
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)", (version,)
+        )
 
 
 def insert_snapshot(
@@ -76,34 +117,27 @@ def insert_snapshot(
         "VALUES (?, ?, ?, ?)",
         (recorded_at, commit_sha, label, source_path),
     )
-    conn.commit()
     return int(cur.lastrowid)
 
 
-def _row_field(row, key: str):
-    if hasattr(row, key):
-        return getattr(row, key)
-    return row[key]
-
-
-def insert_modules(conn: sqlite3.Connection, snapshot_id: int, rows: Iterable) -> int:
-    payload = []
-    for r in rows:
-        payload.append(
-            (
-                snapshot_id,
-                _row_field(r, "path"),
-                _row_field(r, "package"),
-                int(_row_field(r, "lines_total")),
-                int(_row_field(r, "lines_covered")),
-                float(_row_field(r, "pct")),
-            )
+def insert_modules(
+    conn: sqlite3.Connection, snapshot_id: int, rows: Iterable[dict]
+) -> int:
+    payload = [
+        (
+            snapshot_id,
+            r["path"],
+            r.get("package"),
+            int(r["lines_total"]),
+            int(r["lines_covered"]),
+            float(r["pct"]),
         )
+        for r in rows
+    ]
     conn.executemany(
         "INSERT INTO modules "
         "(snapshot_id, path, package, lines_total, lines_covered, pct) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         payload,
     )
-    conn.commit()
     return len(payload)

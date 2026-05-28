@@ -102,3 +102,27 @@ def test_handle_without_subcommand_prints_usage(hermes_home, capsys):
     assert rc != 0
     err = capsys.readouterr().err
     assert "Usage" in err
+
+
+def test_record_is_transactional_on_failure(
+    sample_cobertura_xml, hermes_home, monkeypatch, capsys
+):
+    """M1: if insert_modules raises mid-record, the snapshot row must roll
+    back instead of being left as an orphan."""
+    args = _build_args(sample_cobertura_xml)
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated db failure")
+
+    monkeypatch.setattr(cli_module.db, "insert_modules", boom)
+    rc = cli_module.handle(args)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "error" in err.lower()
+
+    conn = db.connect()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0, "snapshot row should have been rolled back"

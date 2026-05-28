@@ -28,7 +28,7 @@ def parse_since(since: Optional[str], now: Optional[datetime] = None) -> Optiona
       - None or empty / whitespace → None
       - "Nd" → N days back from `now`
       - "Nw" → N weeks back from `now`
-      - "YYYY-MM-DD" → midnight UTC on that date
+      - "YYYY-MM-DD" or any ISO-8601 datetime → that instant (naive → UTC)
 
     Raises `ValueError` on anything else.
     """
@@ -44,10 +44,12 @@ def parse_since(since: Optional[str], now: Optional[datetime] = None) -> Optiona
     if last == "w" and s[:-1].isdigit():
         return base - timedelta(weeks=int(s[:-1]))
     try:
-        dt = datetime.strptime(s, "%Y-%m-%d")
-        return dt.replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(s)
     except ValueError as e:
         raise ValueError(f"invalid 'since' value: {since!r}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------- SQL helpers -----------------------------------------------------
@@ -72,11 +74,15 @@ def _parse_recorded_at(s: str) -> Optional[datetime]:
     if not s:
         return None
     try:
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except (ValueError, AttributeError):
         return None
+    # Coerce naive timestamps to UTC so comparisons with aware datetimes
+    # don't raise. The CLI always writes Z-suffixed (aware) timestamps,
+    # but hand-edited or pre-existing rows might not.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------- queries ---------------------------------------------------------
@@ -208,25 +214,57 @@ def worst_regressions(
     limit: int = 10,
     now: Optional[datetime] = None,
 ) -> List[dict]:
-    """Scan all known module paths and return those currently regressing."""
-    paths = [
-        r["path"]
-        for r in conn.execute(
-            "SELECT DISTINCT path FROM modules ORDER BY path"
-        ).fetchall()
-    ]
+    """Scan all known module paths and return those currently regressing.
+
+    Single SQL pass over `modules` + grouping in Python, instead of N+1
+    queries (one per path).
+    """
+    params: list = []
+    sql = (
+        "SELECT modules.path        AS path, "
+        "       s.recorded_at       AS recorded_at, "
+        "       s.id                AS snapshot_id, "
+        "       modules.lines_total AS lines_total, "
+        "       modules.lines_covered AS lines_covered "
+        "FROM modules "
+        "JOIN snapshots s ON s.id = modules.snapshot_id"
+    )
+    if since is not None:
+        sql += " WHERE s.recorded_at >= ?"
+        params.append(_iso(since))
+    sql += " ORDER BY modules.path ASC, s.recorded_at ASC, s.id ASC"
+
+    rows = conn.execute(sql, params).fetchall()
+
+    by_path: dict[str, List[dict]] = {}
+    for r in rows:
+        total = int(r["lines_total"] or 0)
+        covered = int(r["lines_covered"] or 0)
+        pct = (100.0 * covered / total) if total > 0 else 0.0
+        by_path.setdefault(r["path"], []).append(
+            {
+                "recorded_at": r["recorded_at"],
+                "lines_total": total,
+                "lines_covered": covered,
+                "pct": round(pct, 4),
+            }
+        )
+
     out: List[dict] = []
-    for path in paths:
-        series = module_series(conn, path, since=since)
-        if not series:
-            continue
+    for path, series in by_path.items():
         info = detect_regression(
             series, threshold=threshold, window_days=window_days, now=now,
         )
         if info["regression"]:
             out.append({"module": path, "samples": len(series), **info})
     # Sort by most negative delta_vs_window_max first.
-    out.sort(key=lambda r: (r["delta_vs_window_max"] or 0.0))
-    if limit and limit > 0:
+    out.sort(
+        key=lambda r: (
+            r["delta_vs_window_max"]
+            if r["delta_vs_window_max"] is not None
+            else 0.0
+        )
+    )
+    if isinstance(limit, int) and limit >= 0:
         out = out[:limit]
     return out

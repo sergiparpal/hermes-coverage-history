@@ -6,6 +6,7 @@ run deterministically from CI or cron without an LLM in the loop.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from datetime import datetime, timezone
 
@@ -18,7 +19,7 @@ def _utc_now_iso() -> str:
 
 
 def setup_argparse(subparser) -> None:
-    subs = subparser.add_subparsers(dest="coverage_command")
+    subs = subparser.add_subparsers(dest="coverage_command", required=False)
     rec = subs.add_parser(
         "record",
         help="Ingest a Cobertura XML coverage report into the local history DB.",
@@ -55,17 +56,26 @@ def _handle_record(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    module_dicts = [dataclasses.asdict(r) for r in rows]
+
     conn = db.connect()
     try:
-        snapshot_id = db.insert_snapshot(
-            conn,
-            recorded_at=_utc_now_iso(),
-            commit_sha=getattr(args, "sha", None),
-            label=getattr(args, "label", None),
-            source_path=str(report_path),
-        )
-        n = db.insert_modules(conn, snapshot_id, rows)
-    finally:
+        # `with conn:` makes snapshot + modules a single transaction —
+        # if insert_modules raises (e.g. UNIQUE collision, disk full),
+        # the snapshot insert is rolled back instead of left as an orphan.
+        with conn:
+            snapshot_id = db.insert_snapshot(
+                conn,
+                recorded_at=_utc_now_iso(),
+                commit_sha=getattr(args, "sha", None),
+                label=getattr(args, "label", None),
+                source_path=str(report_path),
+            )
+            n = db.insert_modules(conn, snapshot_id, module_dicts)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
         conn.close()
+        return 1
+    conn.close()
     print(f"Recorded {n} modules from {report_path} (snapshot #{snapshot_id})")
     return 0

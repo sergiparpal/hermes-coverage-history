@@ -21,6 +21,8 @@ def _seed(conn, recorded_at, path, lt, lc, package=""):
         "lines_total": lt, "lines_covered": lc,
         "pct": (100.0 * lc / lt) if lt else 0.0,
     }])
+    # Tool handlers open their own connection; commit so they can see the seed.
+    conn.commit()
 
 
 # ---------- coverage_trend -------------------------------------------------
@@ -160,3 +162,27 @@ def test_coverage_regressions_limit_honored(tmp_db, hermes_home):
     out = tools.coverage_regressions({"since": "30d", "limit": 2})
     payload = json.loads(out)
     assert payload["count"] == 2
+
+
+def test_coverage_regressions_limit_zero_returns_no_rows(tmp_db, hermes_home):
+    """H3: limit=0 should return 0 rows, not silently return all rows."""
+    now = datetime.now(UTC)
+    for p in ("a.py", "b.py"):
+        _seed(tmp_db, _iso(now - timedelta(days=10)), p, 100, 95)
+        _seed(tmp_db, _iso(now - timedelta(days=1)), p, 100, 70)
+    out = tools.coverage_regressions({"since": "30d", "limit": 0})
+    payload = json.loads(out)
+    assert payload["count"] == 0
+    assert payload["regressions"] == []
+
+
+def test_coverage_regressions_negative_limit_clamps_to_zero(
+    tmp_db, hermes_home
+):
+    """H3: negative limit should clamp to 0, not silently return all rows."""
+    now = datetime.now(UTC)
+    _seed(tmp_db, _iso(now - timedelta(days=10)), "a.py", 100, 95)
+    _seed(tmp_db, _iso(now - timedelta(days=1)), "a.py", 100, 70)
+    out = tools.coverage_regressions({"since": "30d", "limit": -5})
+    payload = json.loads(out)
+    assert payload["count"] == 0

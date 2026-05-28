@@ -23,6 +23,25 @@ class ModuleCoverage:
     pct: float
 
 
+def _normalize_path(filename: str) -> str:
+    """Coalesce producer-specific path forms so the same module lands under
+    one `path` value across snapshots.
+
+    - Backslash → forward slash (Windows producers).
+    - Collapse repeated separators (e.g. an escaped `\\\\` becoming `//`).
+    - Strip a leading `./` repeatedly.
+    - Strip any leading slashes (treat absolute paths as repo-relative).
+    """
+    p = filename.replace("\\", "/")
+    while "//" in p:
+        p = p.replace("//", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    while p.startswith("/"):
+        p = p[1:]
+    return p
+
+
 def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
     """Parse a Cobertura XML report into a list of `ModuleCoverage` rows.
 
@@ -57,6 +76,7 @@ def parse_report(path: Union[str, Path]) -> List[ModuleCoverage]:
             filename = class_el.get("filename")
             if not filename:
                 continue
+            filename = _normalize_path(filename)
             lines_el = class_el.find("lines")
             lines = list(lines_el.findall("line")) if lines_el is not None else []
             total = len(lines)

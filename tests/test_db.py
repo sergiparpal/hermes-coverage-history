@@ -1,5 +1,9 @@
 """Phase 0: schema init + snapshot/module insert+read round trip."""
 
+import sqlite3
+
+import pytest
+
 import db
 
 
@@ -77,3 +81,44 @@ def test_init_schema_is_idempotent(tmp_db):
     db.init_schema(tmp_db)
     sid = db.insert_snapshot(tmp_db, "2026-05-28T10:00:00Z")
     assert isinstance(sid, int)
+
+
+def test_schema_version_recorded_and_migrations_run_once(tmp_db):
+    versions = [
+        r["version"]
+        for r in tmp_db.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+    ]
+    assert versions == [v for v, _ in db._MIGRATIONS]
+    # Re-init must not re-apply migrations or duplicate version rows.
+    db.init_schema(tmp_db)
+    again = [
+        r["version"]
+        for r in tmp_db.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+    ]
+    assert again == versions
+
+
+def test_unique_snapshot_path_rejects_duplicate(tmp_db):
+    """H4: re-inserting the same (snapshot_id, path) must fail, not silently
+    inflate aggregates."""
+    sid = db.insert_snapshot(tmp_db, "2026-05-28T10:00:00Z")
+    db.insert_modules(tmp_db, sid, [
+        {"path": "a.py", "package": "a", "lines_total": 10,
+         "lines_covered": 7, "pct": 70.0},
+    ])
+    with pytest.raises(sqlite3.IntegrityError):
+        db.insert_modules(tmp_db, sid, [
+            {"path": "a.py", "package": "a", "lines_total": 10,
+             "lines_covered": 5, "pct": 50.0},
+        ])
+
+
+def test_busy_timeout_is_set(tmp_db):
+    """M3: a long-ish busy_timeout keeps concurrent CI ingest + agent read
+    from immediately erroring with 'database is locked'."""
+    timeout_ms = tmp_db.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout_ms >= 5000

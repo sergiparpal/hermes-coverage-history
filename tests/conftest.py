@@ -103,5 +103,5 @@ def tmp_db(hermes_home):
 @pytest.fixture
 def sample_cobertura_xml(tmp_path):
     p = tmp_path / "coverage.xml"
-    p.write_text(SAMPLE_COBERTURA_XML)
+    p.write_text(SAMPLE_COBERTURA_XML, encoding="utf-8")
     return p

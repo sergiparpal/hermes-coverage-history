@@ -60,6 +60,17 @@ def test_parse_since_invalid_raises():
         trends.parse_since("2026-13-99")
 
 
+def test_parse_since_accepts_iso_datetime():
+    """L3: full ISO-8601 timestamps (with or without Z) should parse."""
+    assert trends.parse_since("2026-01-15T12:30:00Z") == datetime(
+        2026, 1, 15, 12, 30, tzinfo=UTC
+    )
+    # Naive ISO datetime should be interpreted as UTC, not raise.
+    assert trends.parse_since("2026-01-15T12:30:00") == datetime(
+        2026, 1, 15, 12, 30, tzinfo=UTC
+    )
+
+
 # ---------- module_series --------------------------------------------------
 
 
@@ -161,6 +172,24 @@ def test_detect_regression_single_point():
     assert info["delta_vs_previous"] is None
     # window_max equals current → delta is 0
     assert info["delta_vs_window_max"] == 0.0
+
+
+def test_detect_regression_handles_naive_recorded_at():
+    """H1: a row whose recorded_at lacks timezone info (e.g. an old
+    hand-edited row) must not crash detect_regression with TypeError."""
+    series = [
+        {"recorded_at": "2026-05-15", "pct": 90.0,
+         "lines_total": 100, "lines_covered": 90},
+        {"recorded_at": "2026-05-20T00:00:00", "pct": 85.0,
+         "lines_total": 100, "lines_covered": 85},
+    ]
+    info = trends.detect_regression(
+        series, threshold=2.0, window_days=30,
+        now=datetime(2026, 5, 28, tzinfo=UTC),
+    )
+    assert info["current_pct"] == 85.0
+    assert info["window_max_pct"] == 90.0
+    assert info["regression"] is True
 
 
 # ---------- HEADLINE: silent regression over 20 snapshots ------------------
