@@ -58,12 +58,23 @@ def parse_since(since: Optional[str], now: Optional[datetime] = None) -> Optiona
 
 
 def _module_match_clause() -> str:
-    # path = :m OR path LIKE :m || '/%' OR package = :m
-    return "(modules.path = ? OR modules.path LIKE ? OR modules.package = ?)"
+    # path = :m OR path LIKE :m || '/%' OR package = :m. The LIKE uses an
+    # explicit ESCAPE so `%` / `_` inside `module` are treated as literals
+    # (see `_module_match_params`).
+    return (
+        "(modules.path = ? "
+        "OR modules.path LIKE ? ESCAPE '\\' "
+        "OR modules.package = ?)"
+    )
 
 
 def _module_match_params(module: str):
-    return (module, module + "/%", module)
+    # Escape SQL LIKE metacharacters so a caller-supplied module containing
+    # `%` or `_` doesn't broaden the prefix match — every char becomes a
+    # literal. Without this, an LLM that passes module="%" would aggregate
+    # across every recorded path.
+    esc = module.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return (module, esc + "/%", module)
 
 
 def _iso(dt: datetime) -> str:

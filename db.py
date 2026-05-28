@@ -90,7 +90,23 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    # Restrict perms so other users on a multi-user host can't read the
+    # local coverage history (default umask 0o022 leaves the DB world-
+    # readable). The parent dir at 0o700 also gates the WAL / SHM files,
+    # which SQLite creates with default perms.
+    _restrict_perms(path)
     return conn
+
+
+def _restrict_perms(path: Path) -> None:
+    # Best-effort: chmod may silently fail on filesystems that don't
+    # support POSIX modes (e.g. NTFS mounts under WSL). The fallback is
+    # the user's existing umask, which is no worse than today.
+    try:
+        os.chmod(path.parent, 0o700)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager

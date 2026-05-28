@@ -17,8 +17,26 @@ import trends
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on `limit`. The LLM could pass 1e12; the slice on the
+# Python side would still be bounded by the actual data, but the
+# intermediate sort/allocation should not be.
+_MAX_LIMIT = 1000
+
 
 # ---------- shared scaffolding ---------------------------------------------
+
+
+def _sanitize_for_response(value: str, *, max_len: int = 512) -> str:
+    """Scrub control characters from a DB-sourced string before it enters
+    the LLM-visible response. Defence in depth against indirect prompt
+    injection — even if a row poisoned with newlines / instruction-shaped
+    prose predated the parser-side validation, it cannot reshape the
+    prompt by the time it leaves a tool handler.
+    """
+    if not isinstance(value, str):
+        return value
+    cleaned = "".join(c for c in value if ord(c) >= 0x20 and ord(c) != 0x7f)
+    return cleaned[:max_len]
 
 
 def _resolve_threshold(args: dict) -> float:
@@ -47,10 +65,11 @@ def _resolve_limit(args: dict) -> int:
         limit = int(raw) if raw is not None else defaults.LIMIT
     except (TypeError, ValueError):
         return defaults.LIMIT
-    # `limit=0` means "return zero rows" (the natural interpretation), and
-    # negatives clamp to zero. Without this, the worst_regressions slice
-    # falls through and silently returns everything.
-    return max(limit, 0)
+    # `limit=0` means "return zero rows" (the natural interpretation);
+    # negatives clamp to zero (so the worst_regressions slice doesn't
+    # fall through and silently return everything); huge values clamp
+    # to _MAX_LIMIT to bound memory.
+    return max(0, min(limit, _MAX_LIMIT))
 
 
 def _json_tool(fn: Callable[..., dict]) -> Callable[..., str]:
@@ -67,10 +86,15 @@ def _json_tool(fn: Callable[..., dict]) -> Callable[..., str]:
                 return json.dumps({"error": "args must be a JSON object"})
             return json.dumps(fn(args, **kwargs))
         except ValueError as e:
+            # Validation errors (missing module, malformed `since`, ...)
+            # echo back what the LLM itself supplied — safe to surface.
             return json.dumps({"error": str(e)})
-        except Exception as e:
+        except Exception:
+            # Unexpected errors can wrap filesystem paths or other host
+            # details (e.g. SQLite's `unable to open database file: ...`).
+            # Log locally; return a generic message to the LLM.
             logger.exception("tool %s failed", fn.__name__)
-            return json.dumps({"error": str(e)})
+            return json.dumps({"error": "internal error"})
     return wrapper
 
 
@@ -120,6 +144,13 @@ def coverage_regressions(args: dict, **kwargs) -> dict:
             window_days=window_days,
             limit=limit,
         )
+
+    # Scrub DB-sourced `module` paths before they enter the LLM-visible
+    # response. The parser rejects pathological values at ingestion, but
+    # this guards rows from any pre-hardening DB.
+    for r in regressions:
+        if "module" in r:
+            r["module"] = _sanitize_for_response(r["module"])
 
     return {
         "since": since_str,

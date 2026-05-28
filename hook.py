@@ -118,6 +118,7 @@ def _format_summary(module: str, series, verdict) -> str:
     current = verdict["current_pct"]
     window_max = verdict["window_max_pct"]
     delta = verdict["delta_vs_window_max"]
+    safe_module = _sanitize_for_prompt(module)
     summary_fields = [
         f"current={current:.2f}%",
         f"samples={len(series)}",
@@ -128,4 +129,16 @@ def _format_summary(module: str, series, verdict) -> str:
         summary_fields.append(f"delta_vs_window_max={delta:+.2f}pp")
     if verdict.get("regression"):
         summary_fields.append("regression=YES")
-    return f"Coverage summary for {module}: " + ", ".join(summary_fields)
+    return f"Coverage summary for {safe_module}: " + ", ".join(summary_fields)
+
+
+def _sanitize_for_prompt(value: str, *, max_len: int = 256) -> str:
+    """Strip control characters and cap length before embedding a stored
+    value into the LLM-visible prompt context.
+
+    Defence in depth against indirect prompt injection: even if a poisoned
+    Cobertura row slipped past the parser-side validation, it cannot
+    shape the prompt across newlines or carry a long instruction payload.
+    """
+    cleaned = "".join(c for c in value if ord(c) >= 0x20 and ord(c) != 0x7f)
+    return cleaned[:max_len]
